@@ -3,7 +3,7 @@
      Name: Delete_Orphaned_Computers_from_AD.ps1 
      Version: 1.0.1
      AUTHOR: ahubbard
-     DATE  : 3/13/2017 
+     DATE  : 3/13/2017
       
 .SYNOPSIS 
      Checks Active Directory for irregular computer account conditions and optionally removes orphaned entries 
