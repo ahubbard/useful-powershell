@@ -35,6 +35,7 @@
 #region Configurable variables
 
     #region AWS credentials
+
         Clear-AWSDefaults
         $CloudProfiles = Get-Content AWScreds.ini
         $CloudReadProfile = $CloudProfiles[0] -replace'[][]',''
@@ -49,9 +50,11 @@
                            -SecretKey $CloudProfiles[6].Substring($CloudProfiles[6].LastIndexOf(' ')+1) `
                            -StoreAs $CloudMailProfile
         [array]::Clear($CloudProfiles, 0, $CloudProfiles.Length)
+
     #endregion
 
     #region Secure AD credential
+
         $ADReadUser = 'xxx\xxx'
 
         # S3 can't read to memory, so copy the key to local file system, read it to memory, securely wipe memory, remove the file, securely wipe the file,
@@ -64,20 +67,24 @@
 
         $ADReadPassword = Get-Content ADpass | ConvertTo-SecureString -SecureKey $SecureEncryptionKey
         $ADCredential = New-Object -TypeName System.Management.Automation.PSCredential ($ADReadUser,$ADReadPassword)
+
     #endregion
 
     #region AD container, domain, AWS region
-    $ADOU = '' # format: 'OU=Servers,OU=ExploitCore' *(remember to reverse the order)*
-    $ADDomain = Get-ADDomain -Credential $ADCredential  | Select-Object -ExpandProperty DistinguishedName
 
-    If ($ADDomain -eq 'DC=xxx,DC=xxx') {
-        $CloudRegion = 'us-west-2'
-        $SMTP = 'email-smtp.us-west-2.amazonaws.com'
-    }
-    Set-DefaultAWSRegion $CloudRegion
+        $ADOU = '' # format: 'OU=Servers,OU=ExploitCore' *(remember to reverse the order)*
+        $ADDomain = Get-ADDomain -Credential $ADCredential  | Select-Object -ExpandProperty DistinguishedName
+
+        If ($ADDomain -eq 'DC=xxx,DC=xxx') {
+            $CloudRegion = 'us-west-2'
+            $SMTP = 'email-smtp.us-west-2.amazonaws.com'
+        }
+        Set-DefaultAWSRegion $CloudRegion
+
     #endregion
 
     #region Set mail parameters
+
         $CloudMailUser = (get-awscredentials -ProfileName $CloudMailProfile).GetCredentials().AccessKey
         $CloudMailPassword = (get-awscredentials -ProfileName $CloudMailProfile).GetCredentials().SecretKey | ConvertTo-SecureString -AsPlainText -Force
         $CloudMailCredential = New-Object -TypeName System.Management.Automation.PSCredential $CloudMailUser,$CloudMailPassword
@@ -93,6 +100,7 @@
             Subject    = 'Report: Orphaned computers in Active Directory'
             Attachment = '.\Orphans.csv'
         }
+
     #endregion
 
 #endregion
@@ -310,101 +318,108 @@
 
 #region Find remaining orphaned computers
 
-    # Ping to determine online state
-    Write-Host "`nConducting network tests on " -NoNewline -ForegroundColor Green; Write-Host $ADValidCandidates.Count -NoNewline -ForegroundColor Red; Write-Host " remaining computer(s):" -ForegroundColor Green
+    #region Evaluate online computers
 
-    Workflow Test-NetworkConnection {
+        # Ping to determine online state
+        Write-Host "`nConducting network tests on " -NoNewline -ForegroundColor Green; Write-Host $ADValidCandidates.Count -NoNewline -ForegroundColor Red; Write-Host " remaining computer(s):" -ForegroundColor Green
 
-        param (
-            [string[]]$Computers
-        )
+        Workflow Test-NetworkConnection {
 
-        ForEach -Parallel -ThrottleLimit 50 ($Computer in $Computers) {
-            Test-Connection -ComputerName $Computer -Count 1 -ErrorAction SilentlyContinue | Select-Object -Property Address,ResponseTimeToLive
-        }
-    }
+            param (
+                [string[]]$Computers
+            )
 
-    $OnlineADComputers = Test-NetworkConnection -Computers $ADValidCandidates.Keys | Select-Object -Property Address,ResponseTimeToLive
-
-    # Check online computers for validity by checking the OS
-    ForEach ($OnlineADComputer in $OnlineADComputers) {
-
-        Switch($OnlineADComputer) {
-
-            # If a linux computer has not been added to AD, and is merely using the same ip address of an entry, add to orphans
-            {$_.ResponseTimeToLive -eq 64} {
-                $OrphanedADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
-                $VacatedIPs.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
-                break
-            }
-
-            # If a windows computer is online, do nothing but report
-            {$_.ResponseTimeToLive -eq 128} {
-                $WindowsADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
-                break
-            }
-
-            # If Amazon infrastructure is using the same ip address of an entry, add to orphans
-            {$_.ResponseTimeToLive -eq 255} {
-                $AmazonComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
-                $OrphanedADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
-                break
+            ForEach -Parallel -ThrottleLimit 50 ($Computer in $Computers) {
+                Test-Connection -ComputerName $Computer -Count 1 -ErrorAction SilentlyContinue | Select-Object -Property Address,ResponseTimeToLive
             }
         }
 
-        $ADValidCandidates.Remove($OnlineADComputer.Address)
-    }
+        $OnlineADComputers = Test-NetworkConnection -Computers $ADValidCandidates.Keys | Select-Object -Property Address,ResponseTimeToLive
 
-    Write-Host "`n`tFound " -NoNewLine; Write-Host $OnlineADComputers.Count -NoNewline -ForegroundColor Red; " IP(s) online in Active Directory:"
-    Write-Host "`n`t`tFound " -NoNewLine; Write-Host $VacatedIPs.Count -NoNewline -ForegroundColor Red; " vacated IP address(es) in Active Directory"
-    Write-Host "`t`tFound " -NoNewLine; Write-Host $WindowsADComputers.Count -NoNewline -ForegroundColor Red; " with valid computer accounts"
-    Write-Host "`t`tFound " -NoNewLine; Write-Host $AmazonComputers.Count -NoNewline -ForegroundColor Red; " orphaned Amazon infrastructure IP(s) previously unaccounted for"
-    Write-Host "`n`tChecking " -NoNewLine; Write-Host $ADValidCandidates.Count -NoNewline -ForegroundColor Red; " computer(s) currently offline:"
+        # Check online computers for validity by checking the OS
+        ForEach ($OnlineADComputer in $OnlineADComputers) {
 
-    # Evaluate offline computers
-    Foreach ($ADValidCandidate in 0..($ADValidCandidates.Count -1)) {
+            Switch($OnlineADComputer) {
 
-        $OfflineADComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
-        $ADValidCandidateComputer = $ADComputers |
-            Where {$_.DistinguishedName -eq $ADValidCandidates[0]} |
-            Select-Object Comment,IPv4Address
-
-        # If offline, see if there's a comment
-        If ($ADValidCandidateComputer.Comment -ne $null) {
-
-            # If there's a comment check if the comment gave an offline date
-            If ($ADValidCandidateComputer.Comment | Where {$_ -like 'Offline <= *'}) {
-
-                # If so, do nothing but report if the date was within the past 7 days
-                If ([datetime]($ADValidCandidateComputer.Comment -split '<= ')[1] -ge (get-date).AddDays(-7)) {
-                    $OfflineADCandidates.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+                # If a linux computer has not been added to AD, and is merely using the same ip address of an entry, add to orphans
+                {$_.ResponseTimeToLive -eq 64} {
+                    $OrphanedADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
+                    $VacatedIPs.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
+                    break
                 }
 
-                # If it's been more than 7 day, add to orphans
-                Else {
-                $OfflineADOrphans.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
-                $OrphanedADComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
-                $OfflineADComputers.Remove($ADValidCandidates[0])
+                # If a windows computer is online, do nothing but report
+                {$_.ResponseTimeToLive -eq 128} {
+                    $WindowsADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
+                    break
+                }
+
+                # If Amazon infrastructure is using the same ip address of an entry, add to orphans
+                {$_.ResponseTimeToLive -eq 255} {
+                    $AmazonComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
+                    $OrphanedADComputers.Add($ADValidCandidates.Item($OnlineADComputer.Address), $OnlineADComputer.Address)
+                    break
                 }
             }
+
+            $ADValidCandidates.Remove($OnlineADComputer.Address)
         }
 
-        # If there's no previous comment, add one dated today
-        Else {
-            Set-ADComputer -Credential $ADCredential $ADValidCandidates[0] -Replace @{comment = "Offline <= " + (Get-Date -format d)}
-            $OfflineADCommentedComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+        Write-Host "`n`tFound " -NoNewLine; Write-Host $OnlineADComputers.Count -NoNewline -ForegroundColor Red; " IP(s) online in Active Directory:"
+        Write-Host "`n`t`tFound " -NoNewLine; Write-Host $VacatedIPs.Count -NoNewline -ForegroundColor Red; " vacated IP address(es) in Active Directory"
+        Write-Host "`t`tFound " -NoNewLine; Write-Host $WindowsADComputers.Count -NoNewline -ForegroundColor Red; " with valid computer accounts"
+        Write-Host "`t`tFound " -NoNewLine; Write-Host $AmazonComputers.Count -NoNewline -ForegroundColor Red; " orphaned Amazon infrastructure IP(s) previously unaccounted for"
+        Write-Host "`n`tChecking " -NoNewLine; Write-Host $ADValidCandidates.Count -NoNewline -ForegroundColor Red; " computer(s) currently offline:"
+
+    #endregion
+
+    #region Evaluate offline computers
+
+        Foreach ($ADValidCandidate in 0..($ADValidCandidates.Count -1)) {
+
+            $OfflineADComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+            $ADValidCandidateComputer = $ADComputers |
+                Where {$_.DistinguishedName -eq $ADValidCandidates[0]} |
+                Select-Object Comment,IPv4Address
+
+            # If offline, see if there's a comment
+            If ($ADValidCandidateComputer.Comment -ne $null) {
+
+                # If there's a comment check if the comment gave an offline date
+                If ($ADValidCandidateComputer.Comment | Where {$_ -like 'Offline <= *'}) {
+
+                    # If so, do nothing but report if the date was within the past 7 days
+                    If ([datetime]($ADValidCandidateComputer.Comment -split '<= ')[1] -ge (get-date).AddDays(-7)) {
+                        $OfflineADCandidates.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+                    }
+
+                    # If it's been more than 7 day, add to orphans
+                    Else {
+                    $OfflineADOrphans.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+                    $OrphanedADComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+                    $OfflineADComputers.Remove($ADValidCandidates[0])
+                    }
+                }
+            }
+
+            # If there's no previous comment, add one dated today
+            Else {
+                Set-ADComputer -Credential $ADCredential $ADValidCandidates[0] -Replace @{comment = "Offline <= " + (Get-Date -format d)}
+                $OfflineADCommentedComputers.Add($ADValidCandidates[0], $ADValidCandidateComputer.IPv4Address)
+            }
+
+            Write-Progress -Activity "Checking offline computers" -Status "% Complete" `
+                -PercentComplete ($ADValidCandidate / ($ADValidCandidates.Count + $OfflineADComputers.Count + $OrphanedADComputers.Count) * 100)
+
+            $ADValidCandidates.Remove($ADValidCandidateComputer.IPv4Address)
         }
 
-        Write-Progress -Activity "Checking offline computers" -Status "% Complete" `
-            -PercentComplete ($ADValidCandidate / ($ADValidCandidates.Count + $OfflineADComputers.Count + $OrphanedADComputers.Count) * 100)
+        Write-Progress -Activity "Checking offline computers" -Status "Completed" -Completed
+        Write-Host "`n`t`tFound " -NoNewLine; Write-Host $OfflineADCommentedComputers.Count -NoNewline -ForegroundColor Red; " computer(s) offline for the first time and flagged"
+        Write-Host "`t`tFound " -NoNewLine; Write-Host $OfflineADCandidates.Count -NoNewline -ForegroundColor Red; " computer(s) offline less than a week, continuing to monitor"
+        Write-Host "`t`tFound " -NoNewLine; Write-Host $OfflineADOrphans.Count -NoNewline -ForegroundColor Red; " computer(s) that have been offline more than a week and orphaned"
 
-        $ADValidCandidates.Remove($ADValidCandidateComputer.IPv4Address)
-    }
-
-    Write-Progress -Activity "Checking offline computers" -Status "Completed" -Completed
-    Write-Host "`n`t`tFound " -NoNewLine; Write-Host $OfflineADCommentedComputers.Count -NoNewline -ForegroundColor Red; " computer(s) offline for the first time and flagged"
-    Write-Host "`t`tFound " -NoNewLine; Write-Host $OfflineADCandidates.Count -NoNewline -ForegroundColor Red; " computer(s) offline less than a week, continuing to monitor"
-    Write-Host "`t`tFound " -NoNewLine; Write-Host $OfflineADOrphans.Count -NoNewline -ForegroundColor Red; " computer(s) that have been offline more than a week and orphaned"
+    #endregion
 
 #endregion
 
