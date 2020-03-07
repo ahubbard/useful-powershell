@@ -27,9 +27,12 @@ $UdpClient.Connect(([System.Net.IPAddress]::Broadcast),0)
 $UdpClient.Send($MagicPacket,$MagicPacket.Length) | Out-Null
 
 # Most scripts only do port 7, but that was unrelable
+$UdpClient = New-Object Net.Sockets.UdpClient
 $UdpClient.Connect(([System.Net.IPAddress]::Broadcast),7)
 $UdpClient.Send($MagicPacket,$MagicPacket.Length) | Out-Null
+$UdpClient.Close()
 
+$UdpClient = New-Object Net.Sockets.UdpClient
 $UdpClient.Connect(([System.Net.IPAddress]::Broadcast),9)
 $UdpClient.Send($MagicPacket,$MagicPacket.Length) | Out-Null
 $UdpClient.Close()
